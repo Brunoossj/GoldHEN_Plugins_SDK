@@ -18,25 +18,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang lld llvm make curl
 
-      - name: Download OpenOrbis Toolchain
+      - name: Setup OpenOrbis Toolchain
         run: |
-          mkdir -p $HOME/OO_PS4_TOOLCHAIN
-          curl -sSL "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz" -o toolchain.tar.gz
-          tar -xzf toolchain.tar.gz -C $HOME/OO_PS4_TOOLCHAIN --strip-components=1 || tar -xzf toolchain.tar.gz -C $HOME/OO_PS4_TOOLCHAIN
-          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/* 2>/dev/null || true
+          curl -sL https://github.com/illusion0001/OpenOrbis-PS4-Toolchain/releases/download/0.0.1.416/toolchain.tar.gz | tar xvz -C .
+          echo "OO_PS4_TOOLCHAIN=${GITHUB_WORKSPACE}/OpenOrbis/PS4Toolchain" >> $GITHUB_ENV
+
+      - name: Ensure Source File Exists
+        run: |
+          mkdir -p source
+          if [ ! -f source/cyclone2_ds4.c ] && [ -f cyclone2_ds4.c ]; then
+            cp cyclone2_ds4.c source/cyclone2_ds4.c
+          fi
+
+      - name: Build GoldHEN SDK
+        run: |
+          make
 
       - name: Create Plugin Makefile
         run: |
-          export OO_PS4_TOOLCHAIN=$HOME/OO_PS4_TOOLCHAIN
-          echo "TARGET := cyclone2_ds4" > Makefile.plugin
-          echo "OBJS := source/cyclone2_ds4.o" >> Makefile.plugin
-          echo "LIBS := -lGoldHEN_Hook -lSceUsbd -lScePad -lkernel" >> Makefile.plugin
-          echo "" >> Makefile.plugin
-          echo "include \$(OO_PS4_TOOLCHAIN)/make/prx.mk" >> Makefile.plugin
+          echo 'TARGET := cyclone2_ds4' > Makefile.plugin
+          echo 'OBJS := source/cyclone2_ds4.o' >> Makefile.plugin
+          echo 'LIBS := -L. -lGoldHEN_Hook -lSceUsbd -lScePad -lkernel' >> Makefile.plugin
+          echo 'EXTRAFLAGS := -Iinclude' >> Makefile.plugin
+          echo '' >> Makefile.plugin
+          echo 'include $(OO_PS4_TOOLCHAIN)/make/prx.mk' >> Makefile.plugin
 
       - name: Compile Plugin
         run: |
-          export OO_PS4_TOOLCHAIN=$HOME/OO_PS4_TOOLCHAIN
           make -f Makefile.plugin
 
       - name: Upload PRX Artifact

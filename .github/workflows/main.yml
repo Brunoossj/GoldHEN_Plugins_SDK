@@ -1,0 +1,36 @@
+name: Build PS4 GoldHEN Plugin
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies & OpenOrbis
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang-10 lld-10 llvm-10 make wget
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/lld-10 100
+          wget https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5/OpenOrbisPS4ToolchainWinLinux.tar.gz -O openorbis.tar.gz
+          mkdir -p $HOME/OO_PS4_TOOLCHAIN
+          tar -xzf openorbis.tar.gz -C $HOME/OO_PS4_TOOLCHAIN --strip-components=1
+          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/*
+
+      - name: Build PRX
+        run: |
+          export OO_PS4_TOOLCHAIN=$HOME/OO_PS4_TOOLCHAIN
+          make
+
+      - name: Upload PRX Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyclone2_ds4_plugin
+          path: "*.prx"

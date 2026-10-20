@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -16,9 +16,7 @@ jobs:
       - name: Install Dependencies & OpenOrbis
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang-10 lld-10 llvm-10 make wget
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
-          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/lld-10 100
+          sudo apt-get install -y build-essential clang lld llvm make wget
           wget https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5/OpenOrbisPS4ToolchainWinLinux.tar.gz -O openorbis.tar.gz
           mkdir -p $HOME/OO_PS4_TOOLCHAIN
           tar -xzf openorbis.tar.gz -C $HOME/OO_PS4_TOOLCHAIN --strip-components=1

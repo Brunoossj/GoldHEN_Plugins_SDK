@@ -16,32 +16,48 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang lld llvm make curl
+          sudo apt-get install -y build-essential clang lld llvm make curl python3
 
       - name: Download OpenOrbis Toolchain
         run: |
           mkdir -p $HOME/OO_PS4_TOOLCHAIN
-          curl -sL https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz -o toolchain.tar.gz
+          curl -sL "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz" -o toolchain.tar.gz
           tar -xzf toolchain.tar.gz -C $HOME/OO_PS4_TOOLCHAIN --strip-components=1 || tar -xzf toolchain.tar.gz -C $HOME/OO_PS4_TOOLCHAIN
-          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/* || true
-          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/linux/* || true
+          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/* $HOME/OO_PS4_TOOLCHAIN/bin/linux/* 2>/dev/null || true
 
-      - name: Build and Install GoldHEN SDK
+      - name: Ensure libusb types in cyclone2_ds4.c
+        run: |
+          if [ -f source/cyclone2_ds4.c ]; then
+            if ! grep -q "typedef void libusb_device_handle;" source/cyclone2_ds4.c; then
+              sed -i '1s/^/typedef void libusb_device_handle;\ntypedef void libusb_device;\n/' source/cyclone2_ds4.c
+            fi
+          fi
+
+      - name: Build cyclone2_ds4.prx
         run: |
           export OO_PS4_TOOLCHAIN=$HOME/OO_PS4_TOOLCHAIN
-          make install
+          mkdir -p build
 
-      - name: Build cyclone2_ds4.prx Plugin
-        run: |
-          export OO_PS4_TOOLCHAIN=$HOME/OO_PS4_TOOLCHAIN
-          cat << 'EOF' > Makefile.plugin
-          TARGET   := cyclone2_ds4
-          OBJS     := source/cyclone2_ds4.o
-          LIBS     := -lGoldHEN_Hook -lSceUsbd -lScePad -lkernel
+          CREATE_FSELF=$(find $HOME/OO_PS4_TOOLCHAIN -name "create-fself" | head -n 1)
+          chmod +x "$CREATE_FSELF" || true
 
-          include $(OO_PS4_TOOLCHAIN)/make/prx.mk
-          EOF
-          make -f Makefile.plugin
+          clang -target x86_64-pc-linux-gnu -ffreestanding -nostdlib -fno-builtin -fPIC \
+            -isysroot $OO_PS4_TOOLCHAIN -isystem $OO_PS4_TOOLCHAIN/include \
+            -c crt/crtprx.c -o build/crtprx.o
+
+          for file in source/*.c; do
+            [ -e "$file" ] || continue
+            filename=$(basename "$file" .c)
+            clang -target x86_64-pc-linux-gnu -ffreestanding -nostdlib -fno-builtin -fPIC \
+              -isysroot $OO_PS4_TOOLCHAIN -isystem $OO_PS4_TOOLCHAIN/include -Iinclude \
+              -D__USE_KLOG__ -c "$file" -o "build/${filename}.o"
+          done
+
+          ld.lld build/*.o -m elf_x86_64 -pie --script $OO_PS4_TOOLCHAIN/link.x -e _init --eh-frame-hdr \
+            -L$OO_PS4_TOOLCHAIN/lib -lSceLibcInternal -lkernel -lSceSysmodule -lSceUsbd -lScePad \
+            -o build/cyclone2_ds4.elf
+
+          "$CREATE_FSELF" -in=build/cyclone2_ds4.elf -out=cyclone2_ds4.prx --lib=cyclone2_ds4.prx --paid 0x3800000000000011
 
       - name: Upload PRX Artifact
         uses: actions/upload-artifact@v4

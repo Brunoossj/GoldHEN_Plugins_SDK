@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
@@ -16,11 +16,12 @@ jobs:
       - name: Install Dependencies & OpenOrbis
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang lld llvm make wget
-          wget https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5/OpenOrbisPS4ToolchainWinLinux.tar.gz -O openorbis.tar.gz
+          sudo apt-get install -y build-essential clang lld llvm make curl
+          curl -L "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5/OpenOrbisPS4ToolchainWinLinux.tar.gz" -o openorbis.tar.gz || \
+          curl -L "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5/OpenOrbisPS4ToolchainLinux.tar.gz" -o openorbis.tar.gz
           mkdir -p $HOME/OO_PS4_TOOLCHAIN
           tar -xzf openorbis.tar.gz -C $HOME/OO_PS4_TOOLCHAIN --strip-components=1
-          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/*
+          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/* || true
 
       - name: Build PRX
         run: |

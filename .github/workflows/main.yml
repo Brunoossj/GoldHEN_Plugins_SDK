@@ -13,23 +13,38 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies & OpenOrbis
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang lld llvm make curl
-          curl -L "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5/OpenOrbisPS4ToolchainWinLinux.tar.gz" -o openorbis.tar.gz || \
-          curl -L "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5/OpenOrbisPS4ToolchainLinux.tar.gz" -o openorbis.tar.gz
-          mkdir -p $HOME/OO_PS4_TOOLCHAIN
-          tar -xzf openorbis.tar.gz -C $HOME/OO_PS4_TOOLCHAIN --strip-components=1
-          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/* || true
 
-      - name: Build PRX
+      - name: Download OpenOrbis Toolchain
+        run: |
+          mkdir -p $HOME/OO_PS4_TOOLCHAIN
+          curl -sL https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz -o toolchain.tar.gz
+          tar -xzf toolchain.tar.gz -C $HOME/OO_PS4_TOOLCHAIN --strip-components=1 || tar -xzf toolchain.tar.gz -C $HOME/OO_PS4_TOOLCHAIN
+          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/* || true
+          chmod +x $HOME/OO_PS4_TOOLCHAIN/bin/linux/* || true
+
+      - name: Build and Install GoldHEN SDK
         run: |
           export OO_PS4_TOOLCHAIN=$HOME/OO_PS4_TOOLCHAIN
-          make
+          make install
+
+      - name: Build cyclone2_ds4.prx Plugin
+        run: |
+          export OO_PS4_TOOLCHAIN=$HOME/OO_PS4_TOOLCHAIN
+          cat << 'EOF' > Makefile.plugin
+          TARGET   := cyclone2_ds4
+          OBJS     := source/cyclone2_ds4.o
+          LIBS     := -lGoldHEN_Hook -lSceUsbd -lScePad -lkernel
+
+          include $(OO_PS4_TOOLCHAIN)/make/prx.mk
+          EOF
+          make -f Makefile.plugin
 
       - name: Upload PRX Artifact
         uses: actions/upload-artifact@v4
         with:
           name: cyclone2_ds4_plugin
-          path: "*.prx"
+          path: "cyclone2_ds4.prx"

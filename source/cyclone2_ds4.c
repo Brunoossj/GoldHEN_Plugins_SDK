@@ -1,0 +1,353 @@
+// cyclone2_ds4.c — Plugin de GoldHEN para GameSir Cyclone 2 (USB-C y Dongle 2.4 GHz)
+// Traduce reportes HID 0x30 (Switch Pro Controller 057E:2009) a DualShock 4 (Jugador 1)
+// Requiere OpenOrbis PS4 Toolchain + GoldHEN Plugins SDK
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <orbis/libkernel.h>
+#include <orbis/Usbd.h>
+#include <orbis/Pad.h>
+#include "Common.h"
+
+GOLDHEN_PLUGIN_DEFINE(
+    "cyclone2_ds4",
+    "GameSir Cyclone 2 (USB-C / Dongle 2.4GHz) to DualShock 4",
+    "Bruno + Assistant",
+    0x00000100
+);
+
+#define CYCLONE2_VID          0x057E
+#define CYCLONE2_PID          0x2009
+#define EP_IN_ADDR            0x82
+#define EP_OUT_ADDR           0x02
+#define STICK_DEADZONE_DS4    8
+
+#ifndef ORBIS_PAD_BUTTON_TOUCH_PAD
+#define ORBIS_PAD_BUTTON_TOUCH_PAD 0x00100000
+#endif
+
+typedef struct {
+    volatile uint32_t buttons;
+    volatile uint8_t  lx;
+    volatile uint8_t  ly;
+    volatile uint8_t  rx;
+    volatile uint8_t  ry;
+    volatile uint8_t  l2;
+    volatile uint8_t  r2;
+    volatile bool     connected;
+    volatile bool     swap_face_buttons;
+} Cyclone2State;
+
+static Cyclone2State g_state = {
+    .buttons = 0,
+    .lx = 128,
+    .ly = 128,
+    .rx = 128,
+    .ry = 128,
+    .l2 = 0,
+    .r2 = 0,
+    .connected = false,
+    .swap_face_buttons = false
+};
+
+static volatile bool g_running = false;
+static pthread_t g_usb_thread;
+
+static void send_notification(const char *text) {
+    OrbisNotificationRequest req;
+    memset(&req, 0, sizeof(req));
+    req.type = NotificationRequest;
+    req.targetId = -1;
+    req.useIconImageUri = 1;
+    strncpy(req.message, text, sizeof(req.message) - 1);
+    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+}
+
+static inline uint8_t scale_stick_x(uint16_t raw12) {
+    int val = (int)(raw12 >> 4);
+    if (val > 255) val = 255;
+    if (val < 0) val = 0;
+    if (val > (128 - STICK_DEADZONE_DS4) && val < (128 + STICK_DEADZONE_DS4)) {
+        return 128;
+    }
+    return (uint8_t)val;
+}
+
+static inline uint8_t scale_stick_y_inverted(uint16_t raw12) {
+    int val = 255 - (int)(raw12 >> 4);
+    if (val > 255) val = 255;
+    if (val < 0) val = 0;
+    if (val > (128 - STICK_DEADZONE_DS4) && val < (128 + STICK_DEADZONE_DS4)) {
+        return 128;
+    }
+    return (uint8_t)val;
+}
+
+static void decode_switch_0x30_report(const uint8_t *buf, int len) {
+    if (len < 12 || buf[0] != 0x30) {
+        return;
+    }
+
+    uint8_t b3 = buf[3];
+    uint8_t b4 = buf[4];
+    uint8_t b5 = buf[5];
+
+    // Atajo en vivo: Captura (0x20) + Plus (0x02) alterna entre mapeo posicional PS4 y mapeo por letra Xbox
+    static bool prev_combo = false;
+    bool cur_combo = ((b4 & 0x22) == 0x22);
+    if (cur_combo && !prev_combo) {
+        g_state.swap_face_buttons = !g_state.swap_face_buttons;
+        send_notification(g_state.swap_face_buttons
+            ? "Cyclone 2: modo por letra (A=Cruz, B=Circulo)"
+            : "Cyclone 2: modo posicional PS4 (B=Cruz, A=Circulo)");
+    }
+    prev_combo = cur_combo;
+
+    uint32_t btns = 0;
+
+    if (!g_state.swap_face_buttons) {
+        // Modo posicional PS4 (coincide con la posicion fisica del DualShock 4)
+        if (b3 & 0x04) btns |= ORBIS_PAD_BUTTON_CROSS;     // B (Abajo)     -> Cruz
+        if (b3 & 0x08) btns |= ORBIS_PAD_BUTTON_CIRCLE;    // A (Derecha)   -> Circulo
+        if (b3 & 0x01) btns |= ORBIS_PAD_BUTTON_SQUARE;    // Y (Izquierda) -> Cuadrado
+        if (b3 & 0x02) btns |= ORBIS_PAD_BUTTON_TRIANGLE;  // X (Arriba)    -> Triangulo
+    } else {
+        // Modo invertido por letra (A->Cruz, B->Circulo, X->Cuadrado, Y->Triangulo)
+        if (b3 & 0x08) btns |= ORBIS_PAD_BUTTON_CROSS;
+        if (b3 & 0x04) btns |= ORBIS_PAD_BUTTON_CIRCLE;
+        if (b3 & 0x02) btns |= ORBIS_PAD_BUTTON_SQUARE;
+        if (b3 & 0x01) btns |= ORBIS_PAD_BUTTON_TRIANGLE;
+    }
+
+    // Cruceta (D-Pad) en byte 5
+    if (b5 & 0x02) btns |= ORBIS_PAD_BUTTON_UP;
+    if (b5 & 0x04) btns |= ORBIS_PAD_BUTTON_RIGHT;
+    if (b5 & 0x01) btns |= ORBIS_PAD_BUTTON_DOWN;
+    if (b5 & 0x08) btns |= ORBIS_PAD_BUTTON_LEFT;
+
+    // Bumpers y gatillos (L, R, ZL, ZR)
+    if (b5 & 0x40) btns |= ORBIS_PAD_BUTTON_L1;
+    if (b3 & 0x40) btns |= ORBIS_PAD_BUTTON_R1;
+    if (b5 & 0x80) btns |= ORBIS_PAD_BUTTON_L2;
+    if (b3 & 0x80) btns |= ORBIS_PAD_BUTTON_R2;
+
+    // Botones centrales y clics de palanca (L3, R3, Options, Touchpad)
+    if (b4 & 0x08) btns |= ORBIS_PAD_BUTTON_L3;
+    if (b4 & 0x04) btns |= ORBIS_PAD_BUTTON_R3;
+    if (b4 & 0x02) btns |= ORBIS_PAD_BUTTON_OPTIONS;
+    if ((b4 & 0x01) || ((b4 & 0x20) && !cur_combo)) {
+        btns |= ORBIS_PAD_BUTTON_TOUCH_PAD;
+    }
+
+    // Ejes analogicos de 12 bits (0..4095, centro 2048)
+    uint16_t raw_lx = (uint16_t)(buf[6] | ((buf[7] & 0x0F) << 8));
+    uint16_t raw_ly = (uint16_t)((buf[7] >> 4) | (buf[8] << 4));
+    uint16_t raw_rx = (uint16_t)(buf[9] | ((buf[10] & 0x0F) << 8));
+    uint16_t raw_ry = (uint16_t)((buf[10] >> 4) | (buf[11] << 4));
+
+    g_state.lx = scale_stick_x(raw_lx);
+    g_state.ly = scale_stick_y_inverted(raw_ly);
+    g_state.rx = scale_stick_x(raw_rx);
+    g_state.ry = scale_stick_y_inverted(raw_ry);
+
+    g_state.l2 = (b5 & 0x80) ? 255 : 0;
+    g_state.r2 = (b3 & 0x80) ? 255 : 0;
+    g_state.buttons = btns;
+}
+
+static int usb_write_packet(libusb_device_handle *dh, const uint8_t *pkt, int len) {
+    uint8_t out_buf[64];
+    memset(out_buf, 0, sizeof(out_buf));
+    if (len > 64) len = 64;
+    memcpy(out_buf, pkt, len);
+    int transferred = 0;
+    return sceUsbdInterruptTransfer(dh, EP_OUT_ADDR, out_buf, 64, &transferred, 300);
+}
+
+static void usb_drain_in(libusb_device_handle *dh, int timeout_ms) {
+    uint8_t in_buf[64];
+    int transferred = 0;
+    uint64_t t0 = sceKernelGetProcessTime();
+    while (g_running && (sceKernelGetProcessTime() - t0) < (uint64_t)timeout_ms * 1000ULL) {
+        int r = sceUsbdInterruptTransfer(dh, EP_IN_ADDR, in_buf, 64, &transferred, 40);
+        if (r != 0 || transferred <= 0) break;
+    }
+}
+
+static void init_switch_pro_handshake(libusb_device_handle *dh) {
+    const uint8_t cmd_info[2]  = {0x80, 0x01};
+    const uint8_t cmd_hs[2]    = {0x80, 0x02};
+    const uint8_t cmd_usb[2]   = {0x80, 0x04};
+    const uint8_t cmd_mode[12] = {0x01, 0x00, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, 0x03, 0x30};
+    const uint8_t cmd_led1[12] = {0x01, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, 0x30, 0x01};
+
+    usb_write_packet(dh, cmd_info, sizeof(cmd_info));
+    usb_drain_in(dh, 250);
+    usb_write_packet(dh, cmd_hs, sizeof(cmd_hs));
+    usb_drain_in(dh, 250);
+    usb_write_packet(dh, cmd_usb, sizeof(cmd_usb));
+    usb_drain_in(dh, 150);
+    usb_write_packet(dh, cmd_mode, sizeof(cmd_mode));
+    usb_drain_in(dh, 250);
+    usb_write_packet(dh, cmd_led1, sizeof(cmd_led1));
+    usb_drain_in(dh, 150);
+}
+
+static void *cyclone2_usb_worker(void *arg) {
+    (void)arg;
+    while (g_running) {
+        libusb_device **list = NULL;
+        ssize_t count = sceUsbdGetDeviceList(&list);
+        libusb_device_handle *dh = NULL;
+
+        if (count > 0 && list != NULL) {
+            for (ssize_t i = 0; i < count; i++) {
+                OrbisUsbdDeviceDescriptor desc;
+                if (sceUsbdGetDeviceDescriptor(list[i], &desc) == 0) {
+                    if (desc.idVendor == CYCLONE2_VID && desc.idProduct == CYCLONE2_PID) {
+                        if (sceUsbdOpen(list[i], &dh) == 0 && dh != NULL) {
+                            break;
+                        }
+                    }
+                }
+            }
+            sceUsbdFreeDeviceList(list, 1);
+        }
+
+        if (dh == NULL) {
+            sceKernelUsleep(1000000);
+            continue;
+        }
+
+        if (sceUsbdClaimInterface(dh, 0) != 0) {
+            sceUsbdClose(dh);
+            sceKernelUsleep(1000000);
+            continue;
+        }
+
+        init_switch_pro_handshake(dh);
+        g_state.connected = true;
+        send_notification("GameSir Cyclone 2 conectado (USB / Dongle)");
+
+        int err_streak = 0;
+        while (g_running) {
+            uint8_t buf[64];
+            int transferred = 0;
+            int r = sceUsbdInterruptTransfer(dh, EP_IN_ADDR, buf, sizeof(buf), &transferred, 50);
+            if (r == 0 && transferred >= 12) {
+                err_streak = 0;
+                decode_switch_0x30_report(buf, transferred);
+            } else if (r != -7 && (uint32_t)r != 0x80240007U) {
+                err_streak++;
+                if (err_streak > 25) {
+                    break;
+                }
+                sceKernelUsleep(20000);
+            }
+        }
+
+        g_state.connected = false;
+        g_state.buttons = 0;
+        g_state.lx = 128;
+        g_state.ly = 128;
+        g_state.rx = 128;
+        g_state.ry = 128;
+        g_state.l2 = 0;
+        g_state.r2 = 0;
+        send_notification("GameSir Cyclone 2 desconectado");
+
+        sceUsbdReleaseInterface(dh, 0);
+        sceUsbdClose(dh);
+        sceKernelUsleep(500000);
+    }
+    return NULL;
+}
+
+static void merge_cyclone2_into_pad(OrbisPadData *pData) {
+    if (!pData || !g_state.connected) {
+        return;
+    }
+
+    pData->buttons |= g_state.buttons;
+
+    if (g_state.l2 > pData->analogButtons.l2) {
+        pData->analogButtons.l2 = g_state.l2;
+    }
+    if (g_state.r2 > pData->analogButtons.r2) {
+        pData->analogButtons.r2 = g_state.r2;
+    }
+
+    if (g_state.lx != 128 || g_state.ly != 128) {
+        pData->leftStick.x = g_state.lx;
+        pData->leftStick.y = g_state.ly;
+    }
+    if (g_state.rx != 128 || g_state.ry != 128) {
+        pData->rightStick.x = g_state.rx;
+        pData->rightStick.y = g_state.ry;
+    }
+
+    pData->connected = 1;
+}
+
+HOOK_INIT(scePadReadState);
+HOOK_INIT(scePadRead);
+
+int32_t scePadReadState_hook(int32_t handle, OrbisPadData *pData) {
+    int32_t ret = HOOK_CONTINUE(scePadReadState, int32_t (*)(int32_t, OrbisPadData *), handle, pData);
+    if (ret == 0 && pData != NULL) {
+        merge_cyclone2_into_pad(pData);
+    }
+    return ret;
+}
+
+int32_t scePadRead_hook(int32_t handle, OrbisPadData *pData, int32_t count) {
+    int32_t ret = HOOK_CONTINUE(scePadRead, int32_t (*)(int32_t, OrbisPadData *, int32_t), handle, pData, count);
+    if (ret >= 0 && pData != NULL) {
+        int32_t n = (ret > 0) ? ret : 1;
+        if (n > count) n = count;
+        for (int32_t i = 0; i < n; i++) {
+            merge_cyclone2_into_pad(&pData[i]);
+        }
+        if (ret == 0 && g_state.connected) {
+            ret = 1;
+        }
+    }
+    return ret;
+}
+
+int32_t attr_public plugin_load(int32_t argc, const char *argv[]) {
+    (void)argc;
+    (void)argv;
+
+    const char *sandbox = sceKernelGetFsSandboxRandomWord();
+    char usbd_path[256];
+    int usbd_h = 0;
+    snprintf(usbd_path, sizeof(usbd_path), "/%s/common/lib/libSceUsbd.sprx", sandbox);
+    if (sys_dynlib_load_prx(usbd_path, &usbd_h) < 0 || usbd_h <= 0) {
+        return -1;
+    }
+    if (sceUsbdInit() != 0) {
+        return -1;
+    }
+
+    HOOK32(scePadReadState);
+    HOOK32(scePadRead);
+
+    g_running = true;
+    pthread_create(&g_usb_thread, NULL, cyclone2_usb_worker, NULL);
+    send_notification("Cyclone2 DS4 listo: conecta cable o dongle");
+    return 0;
+}
+
+int32_t attr_public plugin_unload(int32_t argc, const char *argv[]) {
+    (void)argc;
+    (void)argv;
+    g_running = false;
+    UNHOOK(scePadReadState);
+    UNHOOK(scePadRead);
+    return 0;
+}
